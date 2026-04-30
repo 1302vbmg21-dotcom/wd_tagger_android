@@ -15,12 +15,22 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.documentfile.provider.DocumentFile
+import com.google.gson.GsonBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.security.MessageDigest
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 class MainActivity : AppCompatActivity() {
+    private data class BatchFile(val file: DocumentFile, val relativePath: String)
+    companion object {
+        private const val PREFS_NAME = "wd14_prefs"
+        private const val KEY_RESOURCES_URI = "resources_uri"
+    }
     private lateinit var btnSelectImage: Button
     private lateinit var imagePreview: ImageView
     private lateinit var progressBar: ProgressBar
@@ -29,12 +39,37 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvCharacterTags: TextView
 
     private var tagger: WD14Tagger? = null
+    private var resourcesUri: Uri? = null
 
     private val pickImageLauncher = registerForActivityResult(ActivityResultContracts.GetContent()) { uri: Uri? ->
         uri?.let {
             imagePreview.setImageURI(it)
             processImage(it)
         } ?: Toast.makeText(this, "Изображение не выбрано", Toast.LENGTH_SHORT).show()
+    }
+
+    private val pickResourcesFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri == null) {
+            Toast.makeText(this, "Папка с ресурсами не выбрана", Toast.LENGTH_LONG).show()
+            return@registerForActivityResult
+        }
+        contentResolver.takePersistableUriPermission(
+            uri,
+            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+        )
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putString(KEY_RESOURCES_URI, uri.toString())
+            .apply()
+        resourcesUri = uri
+        initializeTagger()
+    }
+
+    private val pickBatchFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) runBatchMode(uri)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,19 +86,127 @@ class MainActivity : AppCompatActivity() {
         btnSelectImage.setOnClickListener {
             checkPermissionAndPickImage()
         }
+        btnSelectImage.setOnLongClickListener {
+            pickBatchFolderLauncher.launch(null)
+            true
+        }
 
-        // Инициализируем теггер в фоне
+        resourcesUri = loadSavedResourcesUri()
+        if (resourcesUri == null) {
+            Toast.makeText(this, "Выберите папку с model.onnx и selected_tags.csv", Toast.LENGTH_LONG).show()
+            pickResourcesFolderLauncher.launch(null)
+        } else {
+            initializeTagger()
+        }
+    }
+
+    private fun runBatchMode(batchRootUri: Uri) {
+        val modelName = "WD14 moat tagger v2"
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                val root = DocumentFile.fromTreeUri(this@MainActivity, batchRootUri) ?: return@withContext
+                val allFiles = mutableListOf<BatchFile>()
+                collectImagesRecursive(root, "", allFiles)
+                var processed = 0
+                val ratingOut = linkedMapOf(
+                    "general" to mutableListOf<Double>(),
+                    "sensitive" to mutableListOf<Double>(),
+                    "questionable" to mutableListOf<Double>(),
+                    "explicit" to mutableListOf<Double>()
+                )
+                val tagOut = linkedMapOf<String, MutableList<Double>>()
+                val queryOut = linkedMapOf<String, List<Any>>()
+
+                for (bf in allFiles) {
+                    val raw = tagger?.predictRaw(bf.file.uri) ?: continue
+                    val imageId = processed
+                    val key = sha256((bf.file.uri.toString() + modelName).toByteArray()) + modelName
+                    val fakePath = "X:\\\\" + bf.relativePath.replace("/", "\\")
+                    queryOut[key] = listOf(fakePath, imageId)
+
+                    raw.rating.forEach { (name, score) ->
+                        ratingOut[name]?.apply {
+                            add(packImageScore(imageId, score.toDouble()))
+                        }
+                    }
+                    raw.tags.forEach { (tag, score) ->
+                        if (score < 0.005f) return@forEach
+                        val arr = tagOut.getOrPut(tag) { mutableListOf() }
+                        arr.add(packImageScore(imageId, score.toDouble()))
+                    }
+                    processed++
+                    withContext(Dispatchers.Main) {
+                        btnSelectImage.text = "Batch: $processed/${allFiles.size}"
+                    }
+                }
+                val finalJson = linkedMapOf(
+                    "rating" to ratingOut,
+                    "tag" to tagOut,
+                    "query" to queryOut
+                )
+                val gson = GsonBuilder().disableHtmlEscaping().create()
+                writeJsonChunk(root, gson.toJson(finalJson), "db.json")
+                withContext(Dispatchers.Main) {
+                    btnSelectImage.text = "Выбрать изображение"
+                    Toast.makeText(this@MainActivity, "Batch завершен: $processed файлов", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun collectImagesRecursive(dir: DocumentFile, rel: String, out: MutableList<BatchFile>) {
+        dir.listFiles().forEach {
+            val name = it.name ?: return@forEach
+            val nextRel = if (rel.isEmpty()) name else "$rel/$name"
+            if (it.isDirectory) collectImagesRecursive(it, nextRel, out)
+            else if (it.isFile && (name.lowercase().endsWith(".jpg") || name.lowercase().endsWith(".png") || name.lowercase().endsWith(".jpeg"))) {
+                out.add(BatchFile(it, nextRel))
+            }
+        }
+    }
+
+    private fun packImageScore(imageId: Int, score: Double): Double {
+        val truncated = BigDecimal(score).setScale(15, RoundingMode.DOWN)
+        return BigDecimal(imageId).add(truncated).toDouble()
+    }
+
+    private fun writeJsonChunk(root: DocumentFile, json: String, name: String) {
+        val f = root.createFile("application/json", name) ?: return
+        contentResolver.openOutputStream(f.uri)?.bufferedWriter()?.use { it.write(json) }
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
+
+    private fun loadSavedResourcesUri(): Uri? {
+        val raw = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+            .getString(KEY_RESOURCES_URI, null) ?: return null
+        val uri = Uri.parse(raw)
+        val root = DocumentFile.fromTreeUri(this, uri)
+        return if (root != null && root.exists()) uri else null
+    }
+
+    private fun initializeTagger() {
+        progressBar.visibility = ProgressBar.VISIBLE
+        btnSelectImage.isEnabled = false
+        btnSelectImage.text = "Загрузка модели..."
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 try {
-                    tagger = WD14Tagger(this@MainActivity)
+                    tagger = WD14Tagger(this@MainActivity, resourcesUri)
                     tagger?.initialize()
                     withContext(Dispatchers.Main) {
+                        progressBar.visibility = ProgressBar.GONE
+                        btnSelectImage.isEnabled = true
+                        btnSelectImage.text = "Выбрать изображение"
                         Toast.makeText(this@MainActivity, "Модель загружена", Toast.LENGTH_SHORT).show()
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                     withContext(Dispatchers.Main) {
+                        progressBar.visibility = ProgressBar.GONE
+                        btnSelectImage.isEnabled = true
+                        btnSelectImage.text = "Выбрать изображение"
                         Toast.makeText(this@MainActivity, "Ошибка загрузки модели: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }
@@ -107,11 +250,12 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             progressBar.visibility = ProgressBar.VISIBLE
+            var predictionError: Exception? = null
             val result = withContext(Dispatchers.IO) {
                 try {
                     tagger?.predict(uri)
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    predictionError = e
                     null
                 }
             }
@@ -120,7 +264,8 @@ class MainActivity : AppCompatActivity() {
             if (result != null) {
                 displayResults(result)
             } else {
-                Toast.makeText(this@MainActivity, "Ошибка обработки изображения", Toast.LENGTH_SHORT).show()
+                val details = predictionError?.message?.take(120) ?: "неизвестная причина"
+                Toast.makeText(this@MainActivity, "Ошибка обработки изображения: $details", Toast.LENGTH_LONG).show()
             }
         }
     }
