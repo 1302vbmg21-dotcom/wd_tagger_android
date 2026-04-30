@@ -105,36 +105,59 @@ class MainActivity : AppCompatActivity() {
                 val allFiles = mutableListOf<DocumentFile>()
                 collectImagesRecursive(root, allFiles)
                 var processed = 0
-                var chunk = mutableMapOf<String, Any>()
-                var chunkNo = 0
-                val gson = GsonBuilder().setPrettyPrinting().create()
+                val ratingOut = linkedMapOf(
+                    "general" to mutableListOf<Double>(),
+                    "sensitive" to mutableListOf<Double>(),
+                    "questionable" to mutableListOf<Double>(),
+                    "explicit" to mutableListOf<Double>()
+                )
+                val tagOut = linkedMapOf<String, MutableList<Double>>()
+                val queryOut = linkedMapOf<String, List<Any>>()
 
                 for (file in allFiles) {
                     val raw = tagger?.predictRaw(file.uri) ?: continue
+                    val imageId = processed
                     val key = sha256((file.uri.toString() + modelName).toByteArray()) + modelName
-                    val fakePath = "X:\\\\seldir\\\\subdir1\\\\" + (file.name ?: "unknown")
-                    chunk[key] = mapOf(
-                        "path" to fakePath,
-                        "rating" to raw.rating,
-                        "tag" to raw.tags
-                    )
+                    val fakePath = "X:\\\\seldir\\\\subdir1\\\\" + relativePathFromRoot(root, file)
+                    queryOut[key] = listOf(fakePath, imageId)
+
+                    raw.rating.forEach { (name, score) ->
+                        ratingOut[name]?.apply {
+                            add(imageId.toDouble())
+                            add(score.toDouble())
+                        }
+                    }
+                    raw.tags.forEach { (tag, score) ->
+                        val arr = tagOut.getOrPut(tag) { mutableListOf() }
+                        arr.add(imageId.toDouble())
+                        arr.add(score.toDouble())
+                    }
                     processed++
                     withContext(Dispatchers.Main) {
                         btnSelectImage.text = "Batch: $processed/${allFiles.size}"
                     }
-                    if (processed % 100 == 0) {
-                        writeJsonChunk(root, gson.toJson(chunk), "batch_${chunkNo}.json")
-                        chunkNo++
-                        chunk = mutableMapOf()
-                    }
                 }
-                if (chunk.isNotEmpty()) writeJsonChunk(root, gson.toJson(chunk), "batch_${chunkNo}.json")
+                val finalJson = linkedMapOf(
+                    "rating" to ratingOut,
+                    "tag" to tagOut,
+                    "query" to queryOut
+                )
+                val gson = GsonBuilder().disableHtmlEscaping().create()
+                writeJsonChunk(root, gson.toJson(finalJson), "db.json")
                 withContext(Dispatchers.Main) {
                     btnSelectImage.text = "Выбрать изображение"
                     Toast.makeText(this@MainActivity, "Batch завершен: $processed файлов", Toast.LENGTH_LONG).show()
                 }
             }
         }
+    }
+
+    private fun relativePathFromRoot(root: DocumentFile, file: DocumentFile): String {
+        val rootName = root.name ?: "seldir"
+        val full = file.uri.toString()
+        val idx = full.lastIndexOf("%2F")
+        val name = if (idx >= 0) Uri.decode(full.substring(idx + 3)) else (file.name ?: "unknown")
+        return "$rootName\\\\$name"
     }
 
     private fun collectImagesRecursive(dir: DocumentFile, out: MutableList<DocumentFile>) {
