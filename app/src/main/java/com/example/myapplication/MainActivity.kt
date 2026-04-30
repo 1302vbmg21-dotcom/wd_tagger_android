@@ -94,17 +94,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initializeTagger() {
+        progressBar.visibility = ProgressBar.VISIBLE
+        btnSelectImage.isEnabled = false
+        btnSelectImage.text = "Загрузка модели..."
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 try {
                     tagger = WD14Tagger(this@MainActivity, resourcesUri)
                     tagger?.initialize()
                     withContext(Dispatchers.Main) {
+                        progressBar.visibility = ProgressBar.GONE
+                        btnSelectImage.isEnabled = true
+                        btnSelectImage.text = "Выбрать изображение"
                         Toast.makeText(this@MainActivity, "Модель загружена", Toast.LENGTH_SHORT).show()
                     }
                 } catch (e: Exception) {
                     e.printStackTrace()
                     withContext(Dispatchers.Main) {
+                        progressBar.visibility = ProgressBar.GONE
+                        btnSelectImage.isEnabled = true
+                        btnSelectImage.text = "Выбрать изображение"
                         Toast.makeText(this@MainActivity, "Ошибка загрузки модели: ${e.message}", Toast.LENGTH_LONG).show()
                     }
                 }

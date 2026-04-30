@@ -8,6 +8,7 @@ import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import kotlin.math.exp
 
@@ -29,14 +30,39 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
     private lateinit var characterIndices: List<Int>
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
-        val modelBytes = openResource("model.onnx").readBytes()
         env = OrtEnvironment.getEnvironment()
-        session = env.createSession(modelBytes)
+        val modelFile = materializeResourceToFile("model.onnx")
+        session = env.createSession(modelFile.absolutePath)
         tagsList = loadTagsFromCsv(openResource("selected_tags.csv"))
 
         ratingIndices = tagsList.indices.filter { tagsList[it].category == 9 }
         generalIndices = tagsList.indices.filter { tagsList[it].category == 0 }
         characterIndices = tagsList.indices.filter { tagsList[it].category == 4 }
+    }
+
+    private fun openResource(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
+    private fun materializeResourceToFile(fileName: String): File {
+        val outFile = File(context.filesDir, fileName)
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+
+        openResource(fileName).use { input ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE)
+            }
+        }
+        return outFile
     }
 
     private fun openResource(fileName: String): InputStream {
