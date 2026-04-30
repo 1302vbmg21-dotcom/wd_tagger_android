@@ -16,10 +16,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import androidx.documentfile.provider.DocumentFile
+import com.google.gson.GsonBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
+import java.security.MessageDigest
 
 class MainActivity : AppCompatActivity() {
     companion object {
@@ -61,6 +63,12 @@ class MainActivity : AppCompatActivity() {
         initializeTagger()
     }
 
+    private val pickBatchFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri: Uri? ->
+        if (uri != null) runBatchMode(uri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
@@ -75,6 +83,10 @@ class MainActivity : AppCompatActivity() {
         btnSelectImage.setOnClickListener {
             checkPermissionAndPickImage()
         }
+        btnSelectImage.setOnLongClickListener {
+            pickBatchFolderLauncher.launch(null)
+            true
+        }
 
         resourcesUri = loadSavedResourcesUri()
         if (resourcesUri == null) {
@@ -84,6 +96,61 @@ class MainActivity : AppCompatActivity() {
             initializeTagger()
         }
     }
+
+    private fun runBatchMode(batchRootUri: Uri) {
+        val modelName = "WD14 moat tagger v2"
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                val root = DocumentFile.fromTreeUri(this@MainActivity, batchRootUri) ?: return@withContext
+                val allFiles = mutableListOf<DocumentFile>()
+                collectImagesRecursive(root, allFiles)
+                var processed = 0
+                var chunk = mutableMapOf<String, Any>()
+                var chunkNo = 0
+                val gson = GsonBuilder().setPrettyPrinting().create()
+
+                for (file in allFiles) {
+                    val raw = tagger?.predictRaw(file.uri) ?: continue
+                    val key = sha256((file.uri.toString() + modelName).toByteArray()) + modelName
+                    val fakePath = "X:\\\\seldir\\\\subdir1\\\\" + (file.name ?: "unknown")
+                    chunk[key] = mapOf(
+                        "path" to fakePath,
+                        "rating" to raw.rating,
+                        "tag" to raw.tags
+                    )
+                    processed++
+                    withContext(Dispatchers.Main) {
+                        btnSelectImage.text = "Batch: $processed/${allFiles.size}"
+                    }
+                    if (processed % 100 == 0) {
+                        writeJsonChunk(root, gson.toJson(chunk), "batch_${chunkNo}.json")
+                        chunkNo++
+                        chunk = mutableMapOf()
+                    }
+                }
+                if (chunk.isNotEmpty()) writeJsonChunk(root, gson.toJson(chunk), "batch_${chunkNo}.json")
+                withContext(Dispatchers.Main) {
+                    btnSelectImage.text = "Выбрать изображение"
+                    Toast.makeText(this@MainActivity, "Batch завершен: $processed файлов", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    private fun collectImagesRecursive(dir: DocumentFile, out: MutableList<DocumentFile>) {
+        dir.listFiles().forEach {
+            if (it.isDirectory) collectImagesRecursive(it, out)
+            else if (it.isFile && (it.name?.lowercase()?.endsWith(".jpg") == true || it.name?.lowercase()?.endsWith(".png") == true || it.name?.lowercase()?.endsWith(".jpeg") == true)) out.add(it)
+        }
+    }
+
+    private fun writeJsonChunk(root: DocumentFile, json: String, name: String) {
+        val f = root.createFile("application/json", name) ?: return
+        contentResolver.openOutputStream(f.uri)?.bufferedWriter()?.use { it.write(json) }
+    }
+
+    private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun loadSavedResourcesUri(): Uri? {
         val raw = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)

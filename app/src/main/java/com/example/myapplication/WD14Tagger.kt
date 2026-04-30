@@ -17,6 +17,10 @@ data class PredictionResult(
     val general: Map<String, Float>,
     val character: Map<String, Float>
 )
+data class RawPredictionResult(
+    val rating: Map<String, Float>,
+    val tags: Map<String, Float>
+)
 
 class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri? = null) {
     private lateinit var session: OrtSession
@@ -107,6 +111,24 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
 
             output.close()
             extractTags(probs)
+    }
+
+    suspend fun predictRaw(uri: Uri): RawPredictionResult? = withContext(Dispatchers.IO) {
+        val bitmap = loadBitmapFromUri(uri) ?: return@withContext null
+        val inputTensor = preprocessBitmap(bitmap)
+        val output = session.run(mapOf(inputName to inputTensor))
+        val probsArray = output[0].value
+        val probs = when (probsArray) {
+            is FloatArray -> probsArray
+            is Array<*> -> (probsArray[0] as? FloatArray) ?: return@withContext null
+            else -> return@withContext null
+        }
+        output.close()
+        val usableSize = minOf(probs.size, tagsList.size)
+        val rating = ratingIndices.filter { it < usableSize }.associate { tagsList[it].name to probs[it] }
+        val tags = (generalIndices + characterIndices).distinct().filter { it < usableSize }
+            .associate { tagsList[it].name to probs[it] }
+        RawPredictionResult(rating, tags)
     }
 
     private fun loadBitmapFromUri(uri: Uri): Bitmap? {
