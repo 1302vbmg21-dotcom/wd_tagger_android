@@ -22,8 +22,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.InputStream
 import java.security.MessageDigest
+import java.math.BigDecimal
+import java.math.RoundingMode
 
 class MainActivity : AppCompatActivity() {
+    private data class BatchFile(val file: DocumentFile, val relativePath: String)
     companion object {
         private const val PREFS_NAME = "wd14_prefs"
         private const val KEY_RESOURCES_URI = "resources_uri"
@@ -102,8 +105,8 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             withContext(Dispatchers.IO) {
                 val root = DocumentFile.fromTreeUri(this@MainActivity, batchRootUri) ?: return@withContext
-                val allFiles = mutableListOf<DocumentFile>()
-                collectImagesRecursive(root, allFiles)
+                val allFiles = mutableListOf<BatchFile>()
+                collectImagesRecursive(root, "", allFiles)
                 var processed = 0
                 val ratingOut = linkedMapOf(
                     "general" to mutableListOf<Double>(),
@@ -114,23 +117,22 @@ class MainActivity : AppCompatActivity() {
                 val tagOut = linkedMapOf<String, MutableList<Double>>()
                 val queryOut = linkedMapOf<String, List<Any>>()
 
-                for (file in allFiles) {
-                    val raw = tagger?.predictRaw(file.uri) ?: continue
+                for (bf in allFiles) {
+                    val raw = tagger?.predictRaw(bf.file.uri) ?: continue
                     val imageId = processed
-                    val key = sha256((file.uri.toString() + modelName).toByteArray()) + modelName
-                    val fakePath = "X:\\\\seldir\\\\subdir1\\\\" + relativePathFromRoot(root, file)
+                    val key = sha256((bf.file.uri.toString() + modelName).toByteArray()) + modelName
+                    val fakePath = "X:\\\\" + bf.relativePath.replace("/", "\\")
                     queryOut[key] = listOf(fakePath, imageId)
 
                     raw.rating.forEach { (name, score) ->
                         ratingOut[name]?.apply {
-                            add(imageId.toDouble())
-                            add(score.toDouble())
+                            add(packImageScore(imageId, score.toDouble()))
                         }
                     }
                     raw.tags.forEach { (tag, score) ->
+                        if (score < 0.005f) return@forEach
                         val arr = tagOut.getOrPut(tag) { mutableListOf() }
-                        arr.add(imageId.toDouble())
-                        arr.add(score.toDouble())
+                        arr.add(packImageScore(imageId, score.toDouble()))
                     }
                     processed++
                     withContext(Dispatchers.Main) {
@@ -152,19 +154,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun relativePathFromRoot(root: DocumentFile, file: DocumentFile): String {
-        val rootName = root.name ?: "seldir"
-        val full = file.uri.toString()
-        val idx = full.lastIndexOf("%2F")
-        val name = if (idx >= 0) Uri.decode(full.substring(idx + 3)) else (file.name ?: "unknown")
-        return "$rootName\\\\$name"
+    private fun collectImagesRecursive(dir: DocumentFile, rel: String, out: MutableList<BatchFile>) {
+        dir.listFiles().forEach {
+            val name = it.name ?: return@forEach
+            val nextRel = if (rel.isEmpty()) name else "$rel/$name"
+            if (it.isDirectory) collectImagesRecursive(it, nextRel, out)
+            else if (it.isFile && (name.lowercase().endsWith(".jpg") || name.lowercase().endsWith(".png") || name.lowercase().endsWith(".jpeg"))) {
+                out.add(BatchFile(it, nextRel))
+            }
+        }
     }
 
-    private fun collectImagesRecursive(dir: DocumentFile, out: MutableList<DocumentFile>) {
-        dir.listFiles().forEach {
-            if (it.isDirectory) collectImagesRecursive(it, out)
-            else if (it.isFile && (it.name?.lowercase()?.endsWith(".jpg") == true || it.name?.lowercase()?.endsWith(".png") == true || it.name?.lowercase()?.endsWith(".jpeg") == true)) out.add(it)
-        }
+    private fun packImageScore(imageId: Int, score: Double): Double {
+        val truncated = BigDecimal(score).setScale(15, RoundingMode.DOWN)
+        return BigDecimal(imageId).add(truncated).toDouble()
     }
 
     private fun writeJsonChunk(root: DocumentFile, json: String, name: String) {
