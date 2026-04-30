@@ -33,11 +33,37 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
         env = OrtEnvironment.getEnvironment()
         val modelFile = materializeResourceToFile("model.onnx")
         session = env.createSession(modelFile.absolutePath)
-        tagsList = loadTagsFromCsv(openResource("selected_tags.csv"))
+        tagsList = loadTagsFromCsv(openResourceStream("selected_tags.csv"))
 
         ratingIndices = tagsList.indices.filter { tagsList[it].category == 9 }
         generalIndices = tagsList.indices.filter { tagsList[it].category == 0 }
         characterIndices = tagsList.indices.filter { tagsList[it].category == 4 }
+    }
+
+    // Keep only one resource-opening helper to avoid merge-time duplicate overloads.
+    private fun openResourceStream(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
+    private fun materializeResourceToFile(fileName: String): File {
+        val outFile = File(context.filesDir, fileName)
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+
+        openResourceStream(fileName).use { input: InputStream ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE)
+            }
+        }
+        return outFile
     }
 
     private fun openResource(fileName: String): InputStream {
