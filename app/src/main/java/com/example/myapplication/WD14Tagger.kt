@@ -5,8 +5,10 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import androidx.documentfile.provider.DocumentFile
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.io.InputStream
 import kotlin.math.exp
 
@@ -17,7 +19,7 @@ data class PredictionResult(
     val character: Map<String, Float>
 )
 
-class WD14Tagger(private val context: Context) {
+class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri? = null) {
     private lateinit var session: OrtSession
     private lateinit var env: OrtEnvironment
     private lateinit var tagsList: List<TagInfo>
@@ -28,14 +30,40 @@ class WD14Tagger(private val context: Context) {
     private lateinit var characterIndices: List<Int>
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
-        val modelBytes = context.assets.open("model.onnx").readBytes()
         env = OrtEnvironment.getEnvironment()
-        session = env.createSession(modelBytes)
-        tagsList = loadTagsFromCsv(context.assets.open("selected_tags.csv"))
+        val modelFile = materializeResourceToFile("model.onnx")
+        session = env.createSession(modelFile.absolutePath)
+        tagsList = loadTagsFromCsv(openResourceStream("selected_tags.csv"))
 
         ratingIndices = tagsList.indices.filter { tagsList[it].category == 9 }
         generalIndices = tagsList.indices.filter { tagsList[it].category == 0 }
         characterIndices = tagsList.indices.filter { tagsList[it].category == 4 }
+    }
+
+    // Keep only one resource-opening helper to avoid merge-time duplicate overloads.
+    private fun openResourceStream(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
+    private fun materializeResourceToFile(fileName: String): File {
+        val outFile = File(context.filesDir, fileName)
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+
+        openResourceStream(fileName).use { input: InputStream ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE)
+            }
+        }
+        return outFile
     }
 
     private fun loadTagsFromCsv(input: InputStream): List<TagInfo> {
