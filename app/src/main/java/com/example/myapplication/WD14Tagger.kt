@@ -28,16 +28,45 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
     private lateinit var ratingIndices: List<Int>
     private lateinit var generalIndices: List<Int>
     private lateinit var characterIndices: List<Int>
+    private lateinit var inputName: String
 
     suspend fun initialize() = withContext(Dispatchers.IO) {
         env = OrtEnvironment.getEnvironment()
         val modelFile = materializeResourceToFile("model.onnx")
         session = env.createSession(modelFile.absolutePath)
+        inputName = session.inputNames.firstOrNull()
+            ?: throw IllegalStateException("У модели отсутствуют входные тензоры")
         tagsList = loadTagsFromCsv(openResourceStream("selected_tags.csv"))
 
         ratingIndices = tagsList.indices.filter { tagsList[it].category == 9 }
         generalIndices = tagsList.indices.filter { tagsList[it].category == 0 }
         characterIndices = tagsList.indices.filter { tagsList[it].category == 4 }
+    }
+
+    // Keep only one resource-opening helper to avoid merge-time duplicate overloads.
+    private fun openResourceStream(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
+    private fun materializeResourceToFile(fileName: String): File {
+        val outFile = File(context.filesDir, fileName)
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+
+        openResourceStream(fileName).use { input: InputStream ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE)
+            }
+        }
+        return outFile
     }
 
     // Keep only one resource-opening helper to avoid merge-time duplicate overloads.
@@ -123,10 +152,9 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
     }
 
     suspend fun predict(uri: Uri): PredictionResult? = withContext(Dispatchers.IO) {
-        try {
             val bitmap = loadBitmapFromUri(uri) ?: return@withContext null
             val inputTensor = preprocessBitmap(bitmap)
-            val output = session.run(mapOf("input" to inputTensor))
+            val output = session.run(mapOf(inputName to inputTensor))
 
             // Получаем выходные данные
             val probsArray = output[0].value
@@ -138,10 +166,6 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
 
             output.close()
             extractTags(probs)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
     }
 
     private fun loadBitmapFromUri(uri: Uri): Bitmap? {

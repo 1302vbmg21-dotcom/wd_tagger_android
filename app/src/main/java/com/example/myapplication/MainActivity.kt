@@ -157,11 +157,12 @@ class MainActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             progressBar.visibility = ProgressBar.VISIBLE
+            var predictionError: Exception? = null
             val result = withContext(Dispatchers.IO) {
                 try {
                     tagger?.predict(uri)
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    predictionError = e
                     null
                 }
             }
@@ -170,7 +171,8 @@ class MainActivity : AppCompatActivity() {
             if (result != null) {
                 displayResults(result)
             } else {
-                Toast.makeText(this@MainActivity, "Ошибка обработки изображения", Toast.LENGTH_SHORT).show()
+                val details = predictionError?.message?.take(120) ?: "неизвестная причина"
+                Toast.makeText(this@MainActivity, "Ошибка обработки изображения: $details", Toast.LENGTH_LONG).show()
             }
         }
     }
