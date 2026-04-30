@@ -65,6 +65,19 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
         return outFile
     }
 
+    private fun openResource(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
     private fun loadTagsFromCsv(input: InputStream): List<TagInfo> {
         val result = mutableListOf<TagInfo>()
         input.bufferedReader().useLines { lines ->
