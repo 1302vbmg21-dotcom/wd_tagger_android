@@ -66,6 +66,44 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
         return outFile
     }
 
+    private fun openResource(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
+    private fun materializeResourceToFile(fileName: String): File {
+        val outFile = File(context.filesDir, fileName)
+        if (outFile.exists() && outFile.length() > 0L) return outFile
+
+        openResource(fileName).use { input ->
+            outFile.outputStream().use { output ->
+                input.copyTo(output, DEFAULT_BUFFER_SIZE)
+            }
+        }
+        return outFile
+    }
+
+    private fun openResource(fileName: String): InputStream {
+        val treeUri = resourcesTreeUri
+        if (treeUri != null) {
+            val pickedDir = DocumentFile.fromTreeUri(context, treeUri)
+                ?: throw IllegalStateException("Не удалось открыть выбранную папку с ресурсами")
+            val file = pickedDir.findFile(fileName)
+                ?: throw IllegalStateException("В выбранной папке отсутствует файл: $fileName")
+            return context.contentResolver.openInputStream(file.uri)
+                ?: throw IllegalStateException("Не удалось прочитать файл: $fileName")
+        }
+        return context.assets.open(fileName)
+    }
+
     private fun loadTagsFromCsv(input: InputStream): List<TagInfo> {
         val result = mutableListOf<TagInfo>()
         input.bufferedReader().useLines { lines ->
