@@ -36,7 +36,13 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
     suspend fun initialize() = withContext(Dispatchers.IO) {
         env = OrtEnvironment.getEnvironment()
         val modelFile = materializeResourceToFile("model.onnx")
-        session = env.createSession(modelFile.absolutePath)
+        val opts = OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+            // Позволяет ONNX Runtime активнее распараллеливать вычисления на CPU.
+            setIntraOpNumThreads(Runtime.getRuntime().availableProcessors())
+            setInterOpNumThreads(1)
+        }
+        session = env.createSession(modelFile.absolutePath, opts)
         inputName = session.inputNames.firstOrNull()
             ?: throw IllegalStateException("У модели отсутствуют входные тензоры")
         tagsList = loadTagsFromCsv(openResourceStream("selected_tags.csv"))
@@ -98,43 +104,56 @@ class WD14Tagger(private val context: Context, private val resourcesTreeUri: Uri
 
     suspend fun predict(uri: Uri): PredictionResult? = withContext(Dispatchers.IO) {
             val bitmap = loadBitmapFromUri(uri) ?: return@withContext null
-            val inputTensor = preprocessBitmap(bitmap)
-            val output = session.run(mapOf(inputName to inputTensor))
+            try {
+                predictBitmap(bitmap)
+            } finally {
+                bitmap.recycle()
+            }
+    }
 
-            // Получаем выходные данные
+    suspend fun predictBitmap(bitmap: Bitmap): PredictionResult? = withContext(Dispatchers.IO) {
+        val inputTensor = preprocessBitmap(bitmap)
+        inputTensor.use {
+            val output = session.run(mapOf(inputName to inputTensor))
             val probsArray = output[0].value
             val probs = when (probsArray) {
                 is FloatArray -> probsArray
                 is Array<*> -> (probsArray[0] as? FloatArray) ?: return@withContext null
                 else -> return@withContext null
             }
-
             output.close()
-            extractTags(probs)
+            return@withContext extractTags(probs)
+        }
     }
 
     suspend fun predictRaw(uri: Uri): RawPredictionResult? = withContext(Dispatchers.IO) {
         val bitmap = loadBitmapFromUri(uri) ?: return@withContext null
-        val inputTensor = preprocessBitmap(bitmap)
-        val output = session.run(mapOf(inputName to inputTensor))
-        val probsArray = output[0].value
-        val probs = when (probsArray) {
-            is FloatArray -> probsArray
-            is Array<*> -> (probsArray[0] as? FloatArray) ?: return@withContext null
-            else -> return@withContext null
+        try {
+            val inputTensor = preprocessBitmap(bitmap)
+            inputTensor.use {
+                val output = session.run(mapOf(inputName to inputTensor))
+                val probsArray = output[0].value
+                val probs = when (probsArray) {
+                    is FloatArray -> probsArray
+                    is Array<*> -> (probsArray[0] as? FloatArray) ?: return@withContext null
+                    else -> return@withContext null
+                }
+                output.close()
+                val usableSize = minOf(probs.size, tagsList.size)
+                val rating = ratingIndices.filter { it < usableSize }.associate { tagsList[it].name to probs[it] }
+                val tags = (generalIndices + characterIndices).distinct().filter { it < usableSize }
+                    .associate { tagsList[it].name to probs[it] }
+                return@withContext RawPredictionResult(rating, tags)
+            }
+        } finally {
+            bitmap.recycle()
         }
-        output.close()
-        val usableSize = minOf(probs.size, tagsList.size)
-        val rating = ratingIndices.filter { it < usableSize }.associate { tagsList[it].name to probs[it] }
-        val tags = (generalIndices + characterIndices).distinct().filter { it < usableSize }
-            .associate { tagsList[it].name to probs[it] }
-        RawPredictionResult(rating, tags)
     }
 
     private fun loadBitmapFromUri(uri: Uri): Bitmap? {
         return try {
             val inputStream: InputStream? = context.contentResolver.openInputStream(uri)
-            BitmapFactory.decodeStream(inputStream)
+            inputStream.use { BitmapFactory.decodeStream(it) }
         } catch (e: Exception) {
             null
         }
