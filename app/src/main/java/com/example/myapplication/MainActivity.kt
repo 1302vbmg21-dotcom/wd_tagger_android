@@ -123,6 +123,7 @@ class MainActivity : AppCompatActivity() {
                 val alreadyDonePaths = mutableSetOf<String>()
                 val existingTailToId = mutableMapOf<String, Int>()
                 loadExistingDb(root, ratingOut, tagOut, queryOut, alreadyDonePaths, existingTailToId)
+                var nextImageId = (queryOut.values.mapNotNull { (it.getOrNull(1) as? Number)?.toInt() }.maxOrNull() ?: -1) + 1
                 val newFilesTotal = allFiles.count { bf ->
                     val tail = tailFromAuthorPath(bf.relativePath.replace("/", "\\"))
                     !existingTailToId.containsKey(tail)
@@ -139,7 +140,7 @@ class MainActivity : AppCompatActivity() {
                         continue
                     }
                     val raw = tagger?.predictRaw(bf.file.uri) ?: continue
-                    val imageId = queryOut.size
+                    val imageId = nextImageId++
                     queryOut[key] = listOf(fakePath, imageId)
                     alreadyDonePaths.add(fakePath)
 
