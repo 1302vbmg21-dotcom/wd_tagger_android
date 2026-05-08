@@ -121,12 +121,23 @@ class MainActivity : AppCompatActivity() {
                 val tagOut = linkedMapOf<String, MutableList<Double>>()
                 val queryOut = linkedMapOf<String, List<Any>>()
                 val alreadyDonePaths = mutableSetOf<String>()
-                loadExistingDb(root, ratingOut, tagOut, queryOut, alreadyDonePaths)
+                val existingTailToId = mutableMapOf<String, Int>()
+                loadExistingDb(root, ratingOut, tagOut, queryOut, alreadyDonePaths, existingTailToId)
+                val newFilesTotal = allFiles.count { bf ->
+                    val tail = tailFromAuthorPath(bf.relativePath.replace("/", "\\"))
+                    !existingTailToId.containsKey(tail)
+                }
+                var processedNew = 0
 
                 for (bf in allFiles) {
                     val key = sha256((bf.file.uri.toString() + modelName).toByteArray()) + modelName
                     val fakePath = "X:\\" + bf.relativePath.replace("/", "\\")
-                    if (alreadyDonePaths.contains(fakePath)) continue
+                    val tail = tailFromAuthorPath(fakePath.removePrefix("X:\\"))
+                    val existingId = existingTailToId[tail]
+                    if (existingId != null) {
+                        queryOut[key] = listOf(fakePath, existingId)
+                        continue
+                    }
                     val raw = tagger?.predictRaw(bf.file.uri) ?: continue
                     val imageId = queryOut.size
                     queryOut[key] = listOf(fakePath, imageId)
@@ -143,8 +154,9 @@ class MainActivity : AppCompatActivity() {
                         arr.add(packImageScore(imageId, score.toDouble()))
                     }
                     processed++
+                    processedNew++
                     withContext(Dispatchers.Main) {
-                        btnSelectImage.text = "Batch: $processed/${allFiles.size}"
+                        btnSelectImage.text = "Batch: $processedNew/$newFilesTotal (${allFiles.size})"
                     }
                     if (processed % 500 == 0) {
                         writeDbWithBackup(root, ratingOut, tagOut, queryOut)
@@ -206,7 +218,8 @@ class MainActivity : AppCompatActivity() {
         ratingOut: LinkedHashMap<String, MutableList<Double>>,
         tagOut: LinkedHashMap<String, MutableList<Double>>,
         queryOut: LinkedHashMap<String, List<Any>>,
-        donePaths: MutableSet<String>
+        donePaths: MutableSet<String>,
+        tailToId: MutableMap<String, Int>
     ) {
         val db = root.findFile("db.json") ?: return
         val text = contentResolver.openInputStream(db.uri)?.bufferedReader()?.use(BufferedReader::readText) ?: return
@@ -221,8 +234,15 @@ class MainActivity : AppCompatActivity() {
             if (arr.size >= 2) {
                 queryOut[k.toString()] = listOf(arr[0].toString(), (arr[1] as Number).toInt())
                 donePaths.add(arr[0].toString())
+                val p = arr[0].toString().removePrefix("X:\\").removePrefix("K:\\")
+                tailToId[tailFromAuthorPath(p)] = (arr[1] as Number).toInt()
             }
         }
+    }
+
+    private fun tailFromAuthorPath(path: String): String {
+        val parts = path.split("\\").filter { it.isNotBlank() }
+        return if (parts.size >= 2) parts.takeLast(2).joinToString("\\") else path
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
