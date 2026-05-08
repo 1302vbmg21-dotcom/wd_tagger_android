@@ -25,6 +25,7 @@ import java.io.InputStream
 import java.security.MessageDigest
 import java.math.BigDecimal
 import java.math.RoundingMode
+import java.io.BufferedReader
 
 class MainActivity : AppCompatActivity() {
     private data class BatchFile(val file: DocumentFile, val relativePath: String)
@@ -119,13 +120,17 @@ class MainActivity : AppCompatActivity() {
                 )
                 val tagOut = linkedMapOf<String, MutableList<Double>>()
                 val queryOut = linkedMapOf<String, List<Any>>()
+                val alreadyDonePaths = mutableSetOf<String>()
+                loadExistingDb(root, ratingOut, tagOut, queryOut, alreadyDonePaths)
 
                 for (bf in allFiles) {
-                    val raw = tagger?.predictRaw(bf.file.uri) ?: continue
-                    val imageId = processed
                     val key = sha256((bf.file.uri.toString() + modelName).toByteArray()) + modelName
                     val fakePath = "X:\\" + bf.relativePath.replace("/", "\\")
+                    if (alreadyDonePaths.contains(fakePath)) continue
+                    val raw = tagger?.predictRaw(bf.file.uri) ?: continue
+                    val imageId = queryOut.size
                     queryOut[key] = listOf(fakePath, imageId)
+                    alreadyDonePaths.add(fakePath)
 
                     raw.rating.forEach { (name, score) ->
                         ratingOut[name]?.apply {
@@ -141,14 +146,11 @@ class MainActivity : AppCompatActivity() {
                     withContext(Dispatchers.Main) {
                         btnSelectImage.text = "Batch: $processed/${allFiles.size}"
                     }
+                    if (processed % 500 == 0) {
+                        writeDbWithBackup(root, ratingOut, tagOut, queryOut)
+                    }
                 }
-                val finalJson = linkedMapOf(
-                    "rating" to ratingOut,
-                    "tag" to tagOut,
-                    "query" to queryOut
-                )
-                val gson = GsonBuilder().disableHtmlEscaping().create()
-                writeJsonChunk(root, gson.toJson(finalJson), "db.json")
+                writeDbWithBackup(root, ratingOut, tagOut, queryOut)
                 withContext(Dispatchers.Main) {
                     btnSelectImage.text = "Выбрать изображение"
                     Toast.makeText(this@MainActivity, "Batch завершен: $processed файлов", Toast.LENGTH_LONG).show()
@@ -176,6 +178,51 @@ class MainActivity : AppCompatActivity() {
     private fun writeJsonChunk(root: DocumentFile, json: String, name: String) {
         val f = root.createFile("application/json", name) ?: return
         contentResolver.openOutputStream(f.uri)?.bufferedWriter()?.use { it.write(json) }
+    }
+
+    private fun writeDbWithBackup(
+        root: DocumentFile,
+        ratingOut: LinkedHashMap<String, MutableList<Double>>,
+        tagOut: LinkedHashMap<String, MutableList<Double>>,
+        queryOut: LinkedHashMap<String, List<Any>>
+    ) {
+        root.findFile("db.bak")?.delete()
+        root.findFile("db.json")?.let { old ->
+            val bak = root.createFile("application/json", "db.bak")
+            if (bak != null) {
+                contentResolver.openInputStream(old.uri)?.use { i ->
+                    contentResolver.openOutputStream(bak.uri)?.use { o -> i.copyTo(o) }
+                }
+            }
+            old.delete()
+        }
+        val finalJson = linkedMapOf("rating" to ratingOut, "tag" to tagOut, "query" to queryOut)
+        val gson = GsonBuilder().disableHtmlEscaping().create()
+        writeJsonChunk(root, gson.toJson(finalJson), "db.json")
+    }
+
+    private fun loadExistingDb(
+        root: DocumentFile,
+        ratingOut: LinkedHashMap<String, MutableList<Double>>,
+        tagOut: LinkedHashMap<String, MutableList<Double>>,
+        queryOut: LinkedHashMap<String, List<Any>>,
+        donePaths: MutableSet<String>
+    ) {
+        val db = root.findFile("db.json") ?: return
+        val text = contentResolver.openInputStream(db.uri)?.bufferedReader()?.use(BufferedReader::readText) ?: return
+        val map = GsonBuilder().create().fromJson(text, Map::class.java) as? Map<*, *> ?: return
+        val rating = map["rating"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        val tag = map["tag"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        val query = map["query"] as? Map<*, *> ?: emptyMap<Any, Any>()
+        rating.forEach { (k, v) -> ratingOut[k.toString()] = (v as? List<*>)?.mapNotNull { (it as? Number)?.toDouble() }?.toMutableList() ?: mutableListOf() }
+        tag.forEach { (k, v) -> tagOut[k.toString()] = (v as? List<*>)?.mapNotNull { (it as? Number)?.toDouble() }?.toMutableList() ?: mutableListOf() }
+        query.forEach { (k, v) ->
+            val arr = v as? List<*> ?: return@forEach
+            if (arr.size >= 2) {
+                queryOut[k.toString()] = listOf(arr[0].toString(), (arr[1] as Number).toInt())
+                donePaths.add(arr[0].toString())
+            }
+        }
     }
 
     private fun sha256(bytes: ByteArray): String = MessageDigest.getInstance("SHA-256")
