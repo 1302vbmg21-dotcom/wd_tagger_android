@@ -26,6 +26,8 @@ import java.security.MessageDigest
 import java.math.BigDecimal
 import java.math.RoundingMode
 import java.io.BufferedReader
+import com.google.gson.stream.JsonReader
+import java.io.InputStreamReader
 
 class MainActivity : AppCompatActivity() {
     private data class BatchFile(val file: DocumentFile, val relativePath: String)
@@ -184,7 +186,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun packImageScore(imageId: Int, score: Double): Double {
-        val truncated = BigDecimal(score).setScale(15, RoundingMode.DOWN)
+        val truncated = BigDecimal(score).setScale(4, RoundingMode.HALF_UP)
         return BigDecimal(imageId).add(truncated).toDouble()
     }
 
@@ -223,22 +225,57 @@ class MainActivity : AppCompatActivity() {
         tailToId: MutableMap<String, Int>
     ) {
         val db = root.findFile("db.json") ?: return
-        val text = contentResolver.openInputStream(db.uri)?.bufferedReader()?.use(BufferedReader::readText) ?: return
-        val map = GsonBuilder().create().fromJson(text, Map::class.java) as? Map<*, *> ?: return
-        val rating = map["rating"] as? Map<*, *> ?: emptyMap<Any, Any>()
-        val tag = map["tag"] as? Map<*, *> ?: emptyMap<Any, Any>()
-        val query = map["query"] as? Map<*, *> ?: emptyMap<Any, Any>()
-        rating.forEach { (k, v) -> ratingOut[k.toString()] = (v as? List<*>)?.mapNotNull { (it as? Number)?.toDouble() }?.toMutableList() ?: mutableListOf() }
-        tag.forEach { (k, v) -> tagOut[k.toString()] = (v as? List<*>)?.mapNotNull { (it as? Number)?.toDouble() }?.toMutableList() ?: mutableListOf() }
-        query.forEach { (k, v) ->
-            val arr = v as? List<*> ?: return@forEach
-            if (arr.size >= 2) {
-                queryOut[k.toString()] = listOf(arr[0].toString(), (arr[1] as Number).toInt())
-                donePaths.add(arr[0].toString())
-                val p = arr[0].toString().removePrefix("X:\\").removePrefix("K:\\")
-                tailToId[tailFromAuthorPath(p)] = (arr[1] as Number).toInt()
+        contentResolver.openInputStream(db.uri)?.use { input ->
+            JsonReader(InputStreamReader(input)).use { reader ->
+                reader.beginObject()
+                while (reader.hasNext()) {
+                    when (reader.nextName()) {
+                        "rating" -> readNumberMap(reader, ratingOut)
+                        "tag" -> readNumberMap(reader, tagOut)
+                        "query" -> {
+                            reader.beginObject()
+                            while (reader.hasNext()) {
+                                val qk = reader.nextName()
+                                reader.beginArray()
+                                val path = if (reader.hasNext()) reader.nextString() else ""
+                                val id = if (reader.hasNext()) reader.nextInt() else -1
+                                while (reader.hasNext()) reader.skipValue()
+                                reader.endArray()
+                                if (id >= 0) {
+                                    queryOut[qk] = listOf(path, id)
+                                    donePaths.add(path)
+                                    val p = path.removePrefix("X:\\").removePrefix("K:\\")
+                                    tailToId[tailFromAuthorPath(p)] = id
+                                }
+                            }
+                            reader.endObject()
+                        }
+                        else -> reader.skipValue()
+                    }
+                }
+                reader.endObject()
             }
         }
+    }
+
+    private fun readNumberMap(reader: JsonReader, out: LinkedHashMap<String, MutableList<Double>>) {
+        reader.beginObject()
+        while (reader.hasNext()) {
+            val name = reader.nextName()
+            val arr = mutableListOf<Double>()
+            reader.beginArray()
+            while (reader.hasNext()) arr.add(normalizePacked(reader.nextDouble()))
+            reader.endArray()
+            out[name] = arr
+        }
+        reader.endObject()
+    }
+
+    private fun normalizePacked(value: Double): Double {
+        val idPart = kotlin.math.floor(value).toInt()
+        val frac = value - idPart
+        val roundedFrac = BigDecimal(frac).setScale(4, RoundingMode.HALF_UP).toDouble()
+        return idPart + roundedFrac
     }
 
     private fun tailFromAuthorPath(path: String): String {
