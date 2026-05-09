@@ -3,6 +3,7 @@ package com.example.myapplication
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.BitmapFactory
+import android.util.Base64
 import android.net.Uri
 import android.os.Bundle
 import android.util.Base64
