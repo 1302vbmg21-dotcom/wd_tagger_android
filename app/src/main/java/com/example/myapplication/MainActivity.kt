@@ -2,47 +2,56 @@ package com.example.myapplication
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Base64
 import android.net.Uri
 import android.os.Bundle
+import android.util.Base64
+import android.view.Menu
+import android.view.MenuItem
 import android.widget.Button
+import android.widget.EditText
 import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.lifecycle.lifecycleScope
 import androidx.documentfile.provider.DocumentFile
-import com.google.gson.GsonBuilder
+import androidx.lifecycle.lifecycleScope
+import com.google.gson.stream.JsonReader
+import com.google.gson.stream.JsonToken
+import com.google.gson.stream.JsonWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.InputStream
-import java.security.MessageDigest
+import java.io.InputStreamReader
+import java.io.OutputStreamWriter
 import java.math.BigDecimal
 import java.math.RoundingMode
-import java.io.BufferedReader
-import com.google.gson.stream.JsonReader
-import java.io.InputStreamReader
+import java.security.MessageDigest
 
 class MainActivity : AppCompatActivity() {
     private data class BatchFile(val file: DocumentFile, val relativePath: String)
+
     companion object {
         private const val PREFS_NAME = "wd14_prefs"
         private const val KEY_RESOURCES_URI = "resources_uri"
-        // 1x1 png base64 (тестовое изображение-заглушка для бенчмарка старта).
         private const val STARTUP_TEST_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO7Zx1QAAAAASUVORK5CYII="
     }
+
     private lateinit var btnSelectImage: Button
     private lateinit var imagePreview: ImageView
     private lateinit var progressBar: ProgressBar
     private lateinit var tvRating: TextView
     private lateinit var tvGeneralTags: TextView
     private lateinit var tvCharacterTags: TextView
+
+    private var partialBatchSize = 500
+    private var virtualDrive = "X"
+    private var probRound = 4
 
     private var tagger: WD14Tagger? = null
     private var resourcesUri: Uri? = null
@@ -54,27 +63,18 @@ class MainActivity : AppCompatActivity() {
         } ?: Toast.makeText(this, "Изображение не выбрано", Toast.LENGTH_SHORT).show()
     }
 
-    private val pickResourcesFolderLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri: Uri? ->
+    private val pickResourcesFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         if (uri == null) {
             Toast.makeText(this, "Папка с ресурсами не выбрана", Toast.LENGTH_LONG).show()
             return@registerForActivityResult
         }
-        contentResolver.takePersistableUriPermission(
-            uri,
-            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
-        )
-        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
-            .putString(KEY_RESOURCES_URI, uri.toString())
-            .apply()
+        contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putString(KEY_RESOURCES_URI, uri.toString()).apply()
         resourcesUri = uri
         initializeTagger()
     }
 
-    private val pickBatchFolderLauncher = registerForActivityResult(
-        ActivityResultContracts.OpenDocumentTree()
-    ) { uri: Uri? ->
+    private val pickBatchFolderLauncher = registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri: Uri? ->
         if (uri != null) runBatchMode(uri)
     }
 
@@ -89,13 +89,8 @@ class MainActivity : AppCompatActivity() {
         tvGeneralTags = findViewById(R.id.tvGeneralTags)
         tvCharacterTags = findViewById(R.id.tvCharacterTags)
 
-        btnSelectImage.setOnClickListener {
-            checkPermissionAndPickImage()
-        }
-        btnSelectImage.setOnLongClickListener {
-            pickBatchFolderLauncher.launch(null)
-            true
-        }
+        btnSelectImage.setOnClickListener { checkPermissionAndPickImage() }
+        btnSelectImage.setOnLongClickListener { pickBatchFolderLauncher.launch(null); true }
 
         resourcesUri = loadSavedResourcesUri()
         if (resourcesUri == null) {
@@ -106,6 +101,47 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onCreateOptionsMenu(menu: Menu): Boolean {
+        menu.add(0, 1, 0, "⋮").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+        return true
+    }
+
+    override fun onOptionsItemSelected(item: MenuItem): Boolean {
+        if (item.itemId == 1) {
+            showConfigDialog()
+            return true
+        }
+        return super.onOptionsItemSelected(item)
+    }
+
+    private fun showConfigDialog() {
+        val layout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(40, 20, 40, 0)
+        }
+        val inputBatch = EditText(this).apply { hint = "Partial batch size"; setText(partialBatchSize.toString()) }
+        val inputDrive = EditText(this).apply { hint = "Virtual drive"; setText(virtualDrive) }
+        val inputRound = EditText(this).apply { hint = "Prob.round"; setText(probRound.toString()) }
+        layout.addView(inputBatch)
+        layout.addView(inputDrive)
+        layout.addView(inputRound)
+
+        AlertDialog.Builder(this)
+            .setTitle("Config menu")
+            .setView(layout)
+            .setPositiveButton("OK") { _, _ ->
+                partialBatchSize = inputBatch.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: partialBatchSize
+                virtualDrive = inputDrive.text.toString().ifBlank { "X" }.first().uppercase()
+                probRound = inputRound.text.toString().toIntOrNull()?.coerceIn(1, 6) ?: probRound
+            }
+            .setNeutralButton("Default") { _, _ ->
+                partialBatchSize = 500
+                virtualDrive = "X"
+                probRound = 4
+            }
+            .show()
+    }
+
     private fun runBatchMode(batchRootUri: Uri) {
         val modelName = "WD14 moat tagger v2"
         lifecycleScope.launch {
@@ -113,59 +149,60 @@ class MainActivity : AppCompatActivity() {
                 val root = DocumentFile.fromTreeUri(this@MainActivity, batchRootUri) ?: return@withContext
                 val allFiles = mutableListOf<BatchFile>()
                 collectImagesRecursive(root, "", allFiles)
+
+                val existingTailToId = mutableMapOf<String, Int>()
+                val maxId = loadExistingDbIndex(root, existingTailToId)
+                var nextImageId = maxId + 1
+                val newFilesTotal = allFiles.count { !existingTailToId.containsKey(tailFromAuthorPath(it.relativePath.replace("/", "\\"))) }
+                var processedNew = 0
                 var processed = 0
-                val ratingOut = linkedMapOf(
+
+                val chunkRating = linkedMapOf(
                     "general" to mutableListOf<Double>(),
                     "sensitive" to mutableListOf<Double>(),
                     "questionable" to mutableListOf<Double>(),
                     "explicit" to mutableListOf<Double>()
                 )
-                val tagOut = linkedMapOf<String, MutableList<Double>>()
-                val queryOut = linkedMapOf<String, List<Any>>()
-                val alreadyDonePaths = mutableSetOf<String>()
-                val existingTailToId = mutableMapOf<String, Int>()
-                loadExistingDb(root, ratingOut, tagOut, queryOut, alreadyDonePaths, existingTailToId)
-                var nextImageId = (queryOut.values.mapNotNull { (it.getOrNull(1) as? Number)?.toInt() }.maxOrNull() ?: -1) + 1
-                val newFilesTotal = allFiles.count { bf ->
-                    val tail = tailFromAuthorPath(bf.relativePath.replace("/", "\\"))
-                    !existingTailToId.containsKey(tail)
-                }
-                var processedNew = 0
+                val chunkTag = linkedMapOf<String, MutableList<Double>>()
+                val chunkQuery = linkedMapOf<String, List<Any>>()
 
                 for (bf in allFiles) {
                     val key = sha256((bf.file.uri.toString() + modelName).toByteArray()) + modelName
-                    val fakePath = "X:\\" + bf.relativePath.replace("/", "\\")
-                    val tail = tailFromAuthorPath(fakePath.removePrefix("X:\\"))
+                    val fakePath = "$virtualDrive:\\" + bf.relativePath.replace("/", "\\")
+                    val tail = tailFromAuthorPath(fakePath.removePrefix("$virtualDrive:\\"))
                     val existingId = existingTailToId[tail]
-                    if (existingId != null) {
-                        queryOut[key] = listOf(fakePath, existingId)
-                        continue
-                    }
-                    val raw = tagger?.predictRaw(bf.file.uri) ?: continue
-                    val imageId = nextImageId++
-                    queryOut[key] = listOf(fakePath, imageId)
-                    alreadyDonePaths.add(fakePath)
 
-                    raw.rating.forEach { (name, score) ->
-                        ratingOut[name]?.apply {
-                            add(packImageScore(imageId, score.toDouble()))
-                        }
+                    if (existingId != null) {
+                        chunkQuery[key] = listOf(fakePath, existingId)
+                    } else {
+                        val raw = tagger?.predictRaw(bf.file.uri) ?: continue
+                        val imageId = nextImageId++
+                        chunkQuery[key] = listOf(fakePath, imageId)
+                        raw.rating.forEach { (name, score) -> chunkRating[name]?.add(packImageScore(imageId, score.toDouble())) }
+                        raw.tags.forEach { (tag, score) -> if (score >= 0.005f) chunkTag.getOrPut(tag) { mutableListOf() }.add(packImageScore(imageId, score.toDouble())) }
+                        processedNew++
+                        processed++
                     }
-                    raw.tags.forEach { (tag, score) ->
-                        if (score < 0.005f) return@forEach
-                        val arr = tagOut.getOrPut(tag) { mutableListOf() }
-                        arr.add(packImageScore(imageId, score.toDouble()))
-                    }
-                    processed++
-                    processedNew++
+
                     withContext(Dispatchers.Main) {
                         btnSelectImage.text = "Batch: $processedNew/$newFilesTotal (${allFiles.size})"
                     }
-                    if (processed % 500 == 0) {
-                        writeDbWithBackup(root, ratingOut, tagOut, queryOut)
+
+                    if (processed > 0 && processed % partialBatchSize == 0) {
+                        tagger?.close()
+                        mergeDbChunkWithBackup(root, chunkRating, chunkTag, chunkQuery)
+                        clearChunk(chunkRating, chunkTag, chunkQuery)
+                        tagger = WD14Tagger(this@MainActivity, resourcesUri)
+                        tagger?.initialize()
                     }
                 }
-                writeDbWithBackup(root, ratingOut, tagOut, queryOut)
+
+                tagger?.close()
+                mergeDbChunkWithBackup(root, chunkRating, chunkTag, chunkQuery)
+                clearChunk(chunkRating, chunkTag, chunkQuery)
+                tagger = WD14Tagger(this@MainActivity, resourcesUri)
+                tagger?.initialize()
+
                 withContext(Dispatchers.Main) {
                     btnSelectImage.text = "Выбрать изображение"
                     Toast.makeText(this@MainActivity, "Batch завершен: $processed файлов", Toast.LENGTH_LONG).show()
@@ -179,71 +216,42 @@ class MainActivity : AppCompatActivity() {
             val name = it.name ?: return@forEach
             val nextRel = if (rel.isEmpty()) name else "$rel/$name"
             if (it.isDirectory) collectImagesRecursive(it, nextRel, out)
-            else if (it.isFile && (name.lowercase().endsWith(".jpg") || name.lowercase().endsWith(".png") || name.lowercase().endsWith(".jpeg"))) {
+            else if (it.isFile && (name.lowercase().endsWith(".jpg") || name.lowercase().endsWith(".jpeg") || name.lowercase().endsWith(".png"))) {
                 out.add(BatchFile(it, nextRel))
             }
         }
     }
 
     private fun packImageScore(imageId: Int, score: Double): Double {
-        val truncated = BigDecimal(score).setScale(4, RoundingMode.HALF_UP)
-        return BigDecimal(imageId).add(truncated).toDouble()
+        val rounded = BigDecimal(score).setScale(probRound, RoundingMode.HALF_UP)
+        return BigDecimal(imageId).add(rounded).toDouble()
     }
 
-    private fun writeJsonChunk(root: DocumentFile, json: String, name: String) {
-        val f = root.createFile("application/json", name) ?: return
-        contentResolver.openOutputStream(f.uri)?.bufferedWriter()?.use { it.write(json) }
+    private fun normalizePacked(value: Double): Double {
+        val idPart = kotlin.math.floor(value).toInt()
+        val frac = value - idPart
+        return idPart + BigDecimal(frac).setScale(probRound, RoundingMode.HALF_UP).toDouble()
     }
 
-    private fun writeDbWithBackup(
-        root: DocumentFile,
-        ratingOut: LinkedHashMap<String, MutableList<Double>>,
-        tagOut: LinkedHashMap<String, MutableList<Double>>,
-        queryOut: LinkedHashMap<String, List<Any>>
-    ) {
-        root.findFile("db.bak")?.delete()
-        root.findFile("db.json")?.let { old ->
-            val bak = root.createFile("application/json", "db.bak")
-            if (bak != null) {
-                contentResolver.openInputStream(old.uri)?.use { i ->
-                    contentResolver.openOutputStream(bak.uri)?.use { o -> i.copyTo(o) }
-                }
-            }
-            old.delete()
-        }
-        val finalJson = linkedMapOf("rating" to ratingOut, "tag" to tagOut, "query" to queryOut)
-        val gson = GsonBuilder().disableHtmlEscaping().create()
-        writeJsonChunk(root, gson.toJson(finalJson), "db.json")
-    }
-
-    private fun loadExistingDb(
-        root: DocumentFile,
-        ratingOut: LinkedHashMap<String, MutableList<Double>>,
-        tagOut: LinkedHashMap<String, MutableList<Double>>,
-        queryOut: LinkedHashMap<String, List<Any>>,
-        donePaths: MutableSet<String>,
-        tailToId: MutableMap<String, Int>
-    ) {
-        val db = root.findFile("db.json") ?: return
+    private fun loadExistingDbIndex(root: DocumentFile, tailToId: MutableMap<String, Int>): Int {
+        val db = root.findFile("db.json") ?: return -1
+        var maxId = -1
         contentResolver.openInputStream(db.uri)?.use { input ->
             JsonReader(InputStreamReader(input)).use { reader ->
                 reader.beginObject()
                 while (reader.hasNext()) {
                     when (reader.nextName()) {
-                        "rating" -> readNumberMap(reader, ratingOut)
-                        "tag" -> readNumberMap(reader, tagOut)
                         "query" -> {
                             reader.beginObject()
                             while (reader.hasNext()) {
-                                val qk = reader.nextName()
+                                reader.nextName()
                                 reader.beginArray()
                                 val path = if (reader.hasNext()) reader.nextString() else ""
                                 val id = if (reader.hasNext()) reader.nextInt() else -1
                                 while (reader.hasNext()) reader.skipValue()
                                 reader.endArray()
                                 if (id >= 0) {
-                                    queryOut[qk] = listOf(path, id)
-                                    donePaths.add(path)
+                                    maxId = maxOf(maxId, id)
                                     val p = path.removePrefix("X:\\").removePrefix("K:\\")
                                     tailToId[tailFromAuthorPath(p)] = id
                                 }
@@ -256,26 +264,155 @@ class MainActivity : AppCompatActivity() {
                 reader.endObject()
             }
         }
+        return maxId
     }
 
-    private fun readNumberMap(reader: JsonReader, out: LinkedHashMap<String, MutableList<Double>>) {
-        reader.beginObject()
-        while (reader.hasNext()) {
-            val name = reader.nextName()
-            val arr = mutableListOf<Double>()
-            reader.beginArray()
-            while (reader.hasNext()) arr.add(normalizePacked(reader.nextDouble()))
-            reader.endArray()
-            out[name] = arr
+    private fun mergeDbChunkWithBackup(
+        root: DocumentFile,
+        chunkRating: LinkedHashMap<String, MutableList<Double>>,
+        chunkTag: LinkedHashMap<String, MutableList<Double>>,
+        chunkQuery: LinkedHashMap<String, List<Any>>
+    ) {
+        if (chunkRating.values.all { it.isEmpty() } && chunkTag.isEmpty() && chunkQuery.isEmpty()) return
+
+        root.findFile("db.bak")?.delete()
+        root.findFile("db.json")?.let { old ->
+            val bak = root.createFile("application/json", "db.bak")
+            if (bak != null) {
+                contentResolver.openInputStream(old.uri)?.use { i ->
+                    contentResolver.openOutputStream(bak.uri)?.use { o -> i.copyTo(o) }
+                }
+            }
+            old.delete()
         }
-        reader.endObject()
+
+        val outFile = root.createFile("application/json", "db.json") ?: return
+        contentResolver.openOutputStream(outFile.uri)?.use { os ->
+            JsonWriter(OutputStreamWriter(os, Charsets.UTF_8)).use { writer ->
+                writer.beginObject()
+                writer.name("rating")
+                writer.beginObject()
+                writeMergedNumberSection(root, "rating", writer, chunkRating)
+                writer.endObject()
+
+                writer.name("tag")
+                writer.beginObject()
+                writeMergedNumberSection(root, "tag", writer, chunkTag)
+                writer.endObject()
+
+                writer.name("query")
+                writer.beginObject()
+                writeMergedQuerySection(root, writer, chunkQuery)
+                writer.endObject()
+                writer.endObject()
+            }
+        }
     }
 
-    private fun normalizePacked(value: Double): Double {
-        val idPart = kotlin.math.floor(value).toInt()
-        val frac = value - idPart
-        val roundedFrac = BigDecimal(frac).setScale(4, RoundingMode.HALF_UP).toDouble()
-        return idPart + roundedFrac
+    private fun writeMergedNumberSection(
+        root: DocumentFile,
+        section: String,
+        writer: JsonWriter,
+        chunk: LinkedHashMap<String, MutableList<Double>>
+    ) {
+        val consumed = mutableSetOf<String>()
+        root.findFile("db.bak")?.let { bak ->
+            contentResolver.openInputStream(bak.uri)?.use { input ->
+                JsonReader(InputStreamReader(input)).use { r ->
+                    r.beginObject()
+                    while (r.hasNext()) {
+                        if (r.nextName() == section) {
+                            r.beginObject()
+                            while (r.hasNext()) {
+                                val name = r.nextName()
+                                consumed.add(name)
+                                writer.name(name)
+                                writer.beginArray()
+                                r.beginArray()
+                                while (r.hasNext()) writer.value(normalizePacked(r.nextDouble()))
+                                r.endArray()
+                                chunk[name]?.forEach { writer.value(it) }
+                                writer.endArray()
+                            }
+                            r.endObject()
+                        } else r.skipValue()
+                    }
+                    r.endObject()
+                }
+            }
+        }
+        chunk.forEach { (name, arr) ->
+            if (name !in consumed && arr.isNotEmpty()) {
+                writer.name(name)
+                writer.beginArray()
+                arr.forEach { writer.value(it) }
+                writer.endArray()
+            }
+        }
+    }
+
+    private fun writeMergedQuerySection(root: DocumentFile, writer: JsonWriter, chunkQuery: LinkedHashMap<String, List<Any>>) {
+        val consumed = mutableSetOf<String>()
+        root.findFile("db.bak")?.let { bak ->
+            contentResolver.openInputStream(bak.uri)?.use { input ->
+                JsonReader(InputStreamReader(input)).use { r ->
+                    r.beginObject()
+                    while (r.hasNext()) {
+                        if (r.nextName() == "query") {
+                            r.beginObject()
+                            while (r.hasNext()) {
+                                val key = r.nextName()
+                                consumed.add(key)
+                                if (chunkQuery.containsKey(key)) {
+                                    r.skipValue()
+                                    val v = chunkQuery.getValue(key)
+                                    writer.name(key)
+                                    writer.beginArray()
+                                    writer.value(v[0].toString())
+                                    writer.value((v[1] as Number).toInt())
+                                    writer.endArray()
+                                } else {
+                                    writer.name(key)
+                                    writer.beginArray()
+                                    r.beginArray()
+                                    while (r.hasNext()) {
+                                        when (r.peek()) {
+                                            JsonToken.STRING -> writer.value(r.nextString())
+                                            JsonToken.NUMBER -> writer.value(r.nextInt())
+                                            else -> r.skipValue()
+                                        }
+                                    }
+                                    r.endArray()
+                                    writer.endArray()
+                                }
+                            }
+                            r.endObject()
+                        } else r.skipValue()
+                    }
+                    r.endObject()
+                }
+            }
+        }
+
+        chunkQuery.forEach { (k, v) ->
+            if (k !in consumed) {
+                writer.name(k)
+                writer.beginArray()
+                writer.value(v[0].toString())
+                writer.value((v[1] as Number).toInt())
+                writer.endArray()
+            }
+        }
+    }
+
+    private fun clearChunk(
+        chunkRating: LinkedHashMap<String, MutableList<Double>>,
+        chunkTag: LinkedHashMap<String, MutableList<Double>>,
+        chunkQuery: LinkedHashMap<String, List<Any>>
+    ) {
+        chunkRating.values.forEach { it.clear() }
+        chunkTag.clear()
+        chunkQuery.clear()
     }
 
     private fun tailFromAuthorPath(path: String): String {
@@ -287,8 +424,7 @@ class MainActivity : AppCompatActivity() {
         .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun loadSavedResourcesUri(): Uri? {
-        val raw = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
-            .getString(KEY_RESOURCES_URI, null) ?: return null
+        val raw = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_RESOURCES_URI, null) ?: return null
         val uri = Uri.parse(raw)
         val root = DocumentFile.fromTreeUri(this, uri)
         return if (root != null && root.exists()) uri else null
@@ -311,7 +447,6 @@ class MainActivity : AppCompatActivity() {
                         runStartupBenchmark()
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
                     withContext(Dispatchers.Main) {
                         progressBar.visibility = ProgressBar.GONE
                         btnSelectImage.isEnabled = true
@@ -346,16 +481,14 @@ class MainActivity : AppCompatActivity() {
     private fun checkPermissionAndPickImage() {
         when {
             android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU -> {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES)
-                    == PackageManager.PERMISSION_GRANTED) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED) {
                     pickImageLauncher.launch("image/*")
                 } else {
                     requestPermissionLauncher.launch(Manifest.permission.READ_MEDIA_IMAGES)
                 }
             }
             else -> {
-                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE)
-                    == PackageManager.PERMISSION_GRANTED) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED) {
                     pickImageLauncher.launch("image/*")
                 } else {
                     requestPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -364,9 +497,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
+    private val requestPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (isGranted) pickImageLauncher.launch("image/*")
         else Toast.makeText(this, "Нет разрешения на чтение галереи", Toast.LENGTH_SHORT).show()
     }
@@ -400,27 +531,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun displayResults(result: PredictionResult) {
-        // Rating
-        val ratingText = result.rating.entries.joinToString(", ") {
-            "${it.key}: ${String.format("%.3f", it.value)}"
-        }
+        val ratingText = result.rating.entries.joinToString(", ") { "${it.key}: ${String.format("%.3f", it.value)}" }
         tvRating.text = "Rating: $ratingText"
 
-        // General tags (топ-30)
-        val generalText = result.general.entries
-            .sortedByDescending { it.value }
-            .take(30)
-            .joinToString(", ") {
-                "${it.key} (${String.format("%.2f", it.value)})"
-            }
+        val generalText = result.general.entries.sortedByDescending { it.value }.take(30)
+            .joinToString(", ") { "${it.key} (${String.format("%.2f", it.value)})" }
         tvGeneralTags.text = if (generalText.isNotEmpty()) generalText else "—"
 
-        // Character tags
-        val characterText = result.character.entries
-            .sortedByDescending { it.value }
-            .joinToString(", ") {
-                "${it.key} (${String.format("%.2f", it.value)})"
-            }
+        val characterText = result.character.entries.sortedByDescending { it.value }
+            .joinToString(", ") { "${it.key} (${String.format("%.2f", it.value)})" }
         tvCharacterTags.text = if (characterText.isNotEmpty()) characterText else "—"
     }
 
